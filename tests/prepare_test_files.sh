@@ -14,7 +14,7 @@ EOL
 cat <<EOL > tests/test01/output.txt
 Enter a word: entity
 
-entity in pig latin is: entityyay
+entity in Pig Latin is: entityyay
 EOL
 
 #---------------------------------------
@@ -27,7 +27,7 @@ EOL
 cat <<EOL > tests/test02/output.txt
 Enter a word: pikmin
 
-pikmin in pig latin is: ikminpay
+pikmin in Pig Latin is: ikminpay
 EOL
 
 #---------------------------------------
@@ -39,7 +39,7 @@ EOL
 cat <<EOL > tests/test03/output.txt
 Enter a word: Kingdom
 
-kingdom in pig latin is: ingdomkay
+kingdom in Pig Latin is: ingdomkay
 EOL
 
 #---------------------------------------
@@ -51,5 +51,5 @@ EOL
 cat <<EOL > tests/test04/output.txt
 Enter a word: HEARTS
 
-hearts in pig latin is: eartshay
+hearts in Pig Latin is: eartshay
 EOL
