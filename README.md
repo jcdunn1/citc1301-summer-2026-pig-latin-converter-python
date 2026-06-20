@@ -39,6 +39,12 @@ If a word begins with a consonant:
 | dog | ogday |
 | cat | atcay |
 
+### Case Handling
+
+Your program should convert the word to lowercase before converting it to Pig Latin. Therefore, all Pig Latin output should be lowercase.
+
+For example, `Smile` becomes `milesay`, not `MileSay`.
+
 ## 💻 Example Program Execution
 
 ### Example 1
@@ -62,7 +68,7 @@ dog in in Pig Latin is: ogday
 ```text
 Enter a word: Smile
 
-Smile in Pig Latin is: milesay
+smile in Pig Latin is: milesay
 ```
 
 # 🧐 Hints
