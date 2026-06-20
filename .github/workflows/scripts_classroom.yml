@@ -1,0 +1,290 @@
+name: Autograding Tests
+
+on:
+  push:
+  repository_dispatch:
+
+permissions:
+  checks: write
+  actions: read
+  contents: read
+
+env:
+  PER_TEST_SCORE: 10     # Points to award per test case
+  PARTIAL_WS_PCT: 0.80   # Percentage of points for whitespace errors
+
+jobs:
+  autograde:
+    name: Autograde and Report
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: >
+      github.event_name == 'repository_dispatch' ||
+      github.actor        != 'github-classroom[bot]'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: detect
+        name: Detect language
+        shell: bash
+        run: |
+          set -e
+          langs=()
+          git ls-files '*.py'   | grep -vE '(^|/)helpers/' | grep -q . && langs+=(python)
+          git ls-files '*.cpp'  | grep -q .                  && langs+=(cpp)
+          git ls-files '*.c'    | grep -q .                  && langs+=(c)
+          git ls-files '*.java' | grep -vE '(^|/)helpers/' | grep -q . && langs+=(java)
+          if [ ${#langs[@]} -eq 0 ]; then
+            echo "No source found; skipping tests."
+            echo "language=none" >> "$GITHUB_OUTPUT"
+          else
+            echo "language=${langs[0]}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Make test prep and cleanup scripts executable
+        shell: bash
+        run: |
+          chmod +x tests/prepare_test_files.sh
+          chmod +x tests/cleanup_test_files.sh
+
+      - name: Prepare test files
+        shell: bash
+        run: ./tests/prepare_test_files.sh
+        
+      - name: Compile submission
+        id: compile
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          LANG=${{ steps.detect.outputs.language }}
+          rm -f compile_err.txt
+
+          case "$LANG" in
+            c)
+              SRC=$(git ls-files '*.c')
+              gcc -std=c2x -Wall -Wextra \
+                -include helpers/echo_input.h \
+                $SRC -o student 2> compile_err.txt
+              ;;
+            cpp)
+              SRC=$(git ls-files '*.cpp')
+              g++ -std=c++20 -Wall -Wextra \
+                -include helpers/echo_input.hpp \
+                $SRC -o student 2> compile_err.txt
+              ;;
+            java)
+              javac -encoding UTF-8 -d . helpers/grader.java 2>/dev/null
+              SRC=$(git ls-files '*.java' | grep -vE '^helpers/')
+              [ -n "$SRC" ] && javac -encoding UTF-8 -cp . $SRC 2> compile_err.txt
+              ;;
+            python)
+              echo "No compile step for Python"
+              ;;
+          esac
+
+          if [[ -s compile_err.txt ]]; then
+            echo "error=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "error=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report compilation error
+        if: steps.compile.outputs.error == 'true'
+        shell: bash
+        run: |
+          # Write a minimal summary
+          printf "# Autograding Results\n\n## Compilation Error\n\n\`\`\`\n" \
+            > summary.md
+          cat compile_err.txt >> summary.md
+          printf "\n\`\`\`\n" >> summary.md
+
+          payload=$(jq -n \
+            --argjson version 1 \
+            --arg status "fail" \
+            --arg output "$(sed -e 's/\"/\\"/g' summary.md)" \
+            --argjson max_score 0 \
+            --argjson tests '[]' \
+            '{version:$version,status:$status,max_score:$max_score,output:$output,tests:$tests}')
+          echo "RUN-TESTS_RESULTS=$(echo "$payload" | base64 -w0)" >> "$GITHUB_ENV"
+
+      - id: run-tests
+        name: Run tests & build payload
+        if: steps.compile.outputs.error == 'false'
+        shell: bash
+        run: |
+          set +e
+
+          LANG=${{ steps.detect.outputs.language }}
+
+          if [ "$LANG" = "none" ]; then
+            printf "# Autograding Results\n\n❌  No student source code detected; skipping tests.\n" > summary.md
+
+            payload=$(jq -n \
+              --argjson version 1 \
+              --arg status "fail" \
+              --arg output "$(sed -e 's/\"/\\"/g' summary.md)" \
+              --argjson max_score 0 \
+              --argjson tests '[]' \
+              '{version:$version,status:$status,max_score:$max_score,output:$output,tests:$tests}'
+            )
+
+            base64_payload=$(printf '%s' "$payload" | base64 -w0)
+            echo "RUN-TESTS_RESULTS=$base64_payload" >> "$GITHUB_ENV"
+
+            exit 0
+          fi
+          
+          # defaults (override by setting these env vars in the repo if desired)
+          per=${PER_TEST_SCORE:-10}
+          ws_pct=${PARTIAL_WS_PCT:-0.80}
+
+          LANG=${{ steps.detect.outputs.language }}
+          strip() { tr -d '[:space:]' < "$1"; }
+
+          mapfile -t tests < <(find tests -maxdepth 1 -type d -name 'test??' | sort)
+          max_score=$(( ${#tests[@]} * per ))
+          total_score=0
+          failures=()
+          tests_json="[]"
+
+          cat <<-EOF > summary.md
+          # Autograding Results
+          | Test | Status | Points |
+          |:----:|:------:|:------:|
+          EOF
+
+          run_cmd() {
+            case "$LANG" in
+              python) timeout 10s python3 helpers/grader.py <"$in" >"$act" 2>"$err" ;;
+              c)      timeout 10s ./student <"$in" >"$act" 2>"$err" ;;
+              cpp)    timeout 10s ./student <"$in" >"$act" 2>"$err" ;;
+              java)   timeout 10s java -cp . grader <"$in" >"$act" 2>"$err" ;;
+            esac
+          }
+
+          # pick a representative file name
+          case "$LANG" in
+            python) student_file=$(git ls-files '*.py' | grep -vE '^helpers/' | head -1) ;;
+            cpp)    student_file=$(git ls-files '*.cpp' | head -1) ;;
+            c)    student_file=$(git ls-files '*.c' | head -1) ;;
+            java)   student_file=$(git ls-files '*.java' | grep -vE '^helpers/' | head -1) ;;
+          esac
+          student_file=${student_file:-""}
+
+          for dir in "${tests[@]}"; do
+            n=${dir##*test}
+            in="$dir/input.txt"
+            exp="$dir/output.txt"
+            act="$dir/actual.txt"
+            err="$dir/error.txt"
+
+            run_cmd <"$in" >"$act" 2>"$err"
+            rc=$?
+
+            if (( rc != 0 )); then
+              st="error"; score=0; em="❌"
+            elif diff -q "$exp" "$act" &>/dev/null; then
+              st="pass"; score=$per; em="✅"
+            elif diff -q -b "$exp" "$act" &>/dev/null \
+                 || diff -q <(strip "$exp") <(strip "$act") &>/dev/null; then
+              st="partial (whitespace only)"
+              score=$(awk -v p=$per -v pct=$ws_pct 'BEGIN{printf "%.2f", p*pct}')
+              em="🟡"
+            else
+              st="fail"; score=0; em="❌"
+            fi
+
+            total_score=$(awk -v a=$total_score -v b=$score 'BEGIN{printf "%.2f", a+b}')
+            echo "| Test $n | $em | $score |" >> summary.md
+            [[ $st != "pass" ]] && failures+=("$n")
+
+            case "$LANG" in
+              python) test_cmd="python3 helpers/grader.py < $in" ;;
+              c)    test_cmd="./student < $in" ;;
+              cpp)    test_cmd="./student < $in" ;;
+              java)   test_cmd="java -cp . grader < $in" ;;
+            esac
+
+            tests_json=$(jq --arg name  "Test $n" \
+                            --arg st    "$st" \
+                            --arg cmd   "$test_cmd" \
+                            --arg file  "$student_file" \
+                            --argjson ln 0 \
+                            --argjson sc "$score" \
+                            '. += [{
+                              name:       $name,
+                              status:     $st,
+                              test_code:  $cmd,
+                              filename:   $file,
+                              line_no:    $ln,
+                              score:      $sc
+                            }]' <<<"$tests_json")
+
+          done
+
+          echo >> summary.md
+          echo "### Total Score: **$total_score** / **$max_score**" >> summary.md
+
+          if ((${#failures[@]})); then
+            echo >> summary.md
+            echo "## Failure Details" >> summary.md
+            for n in "${failures[@]}"; do
+              dir="tests/test${n}"
+              {
+                echo "### Test $n"
+                echo "**Input**";    echo '```'; sed -e '$a\' "$dir/input.txt";  echo '```'
+                echo "**Expected**"; echo '```'; sed -e '$a\' "$dir/output.txt"; echo '```'
+                echo "**Actual**";   echo '```'; sed -e '$a\' "$dir/actual.txt"; echo '```'
+                [[ -s "$dir/error.txt" ]] && {
+                  echo "**Error**"; echo '```'; sed -e '$a\' "$dir/error.txt"; echo '```'
+                }
+                echo "**Diff**"; echo '```diff'; diff -u "$dir/output.txt" "$dir/actual.txt" || true; echo '```'
+              } >> summary.md
+            done
+          fi
+
+          overall_status="pass"
+          if awk 'BEGIN { exit !('"$total_score"' < '"$max_score"') }'; then
+            overall_status="fail"
+          fi
+
+          summary_escaped=$(sed \
+            -e 's/\\/\\\\/g' \
+            -e 's/"/\\"/g' summary.md
+          )$'\n'
+
+          payload=$(jq -n \
+            --argjson version 1 \
+            --arg status "$overall_status" \
+            --arg output "$summary_escaped" \
+            --argjson max_score "$max_score" \
+            --argjson tests "$tests_json" \
+            '{version:$version,status:$status,max_score:$max_score,output:$output,tests:$tests}'
+          )
+
+          echo "RUN-TESTS_RESULTS=$(echo "$payload" | base64 -w0)" >> "$GITHUB_ENV"
+
+      - name: Publish Markdown Summary
+        if: always()
+        run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report to GitHub Classroom
+        uses: classroom-resources/autograding-grading-reporter@v1
+        env:
+          RUN-TESTS_RESULTS: ${{ env.RUN-TESTS_RESULTS }}
+        with:
+          runners: run-tests
+
+      - name: Cleanup generated test files
+        if: always()
+        shell: bash
+        run: |
+          rm -rf tests/test??
+          rm -f student compile_err.txt summary.md
+
+      - name: Run test file cleanup script
+        shell: bash
+        run: ./tests/cleanup_test_files.sh
